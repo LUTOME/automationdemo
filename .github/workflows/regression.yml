@@ -1,25 +1,49 @@
-name: 🧪Pipeline Regression in QA
-run-name: ${{github.actor}}👨🏻‍🔬 triggered Regression in ${{github.ref_name}}
+name: 🧪Pipeline Regression
+
+run-name: ${{ github.actor }}👨🏻‍🔬 triggered Regression on ${{ github.ref_name }}
 
 on:
+  pull_request:
+    types: [ opened, synchronize, reopened, ready_for_review ]
+    branches:
+    - dev # PRs hacia dev (feature -> dev)
+    - main # PRs hacia main (dev -> main)
   push:
     branches:
-    - QA
+    - dev # opcional: para auto-PR dev -> main
+  workflow_dispatch:
+
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: regression-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
 
 jobs:
   RegressionTesting:
-    name: regression
-    runs-on: ubuntu-latest
+    name: regression (${{ matrix.os }} / ${{ matrix.browser }})
     strategy:
       fail-fast: false
       matrix:
-        browser: [ 'chrome', 'firefox', 'edge' ] #? Runs tests in 3 different browsers
+        include:
+        - os: ubuntu-latest
+          browser: chrome
+        - os: ubuntu-latest
+          browser: firefox
+        - os: windows-latest # Edge estable en Windows
+          browser: edge
+    runs-on: ${{ matrix.os }}
 
     steps:
-    - name: 💻Checkout
+    - name: 💻 Checkout
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-    - name: 💿Install Node.js
+    - name: 💿 Install Node.js
       uses: actions/setup-node@v4
       with:
         node-version: 20
@@ -27,23 +51,20 @@ jobs:
     - name: 🍙 Bun Setup
       uses: oven-sh/setup-bun@v1
 
-    - name: 🧬Install All Dependencies
-      run: |
-        bun install
+    - name: 🧬 Install All Dependencies
+      run: bun install
 
-    - name: 🧪Cypress E2E Regression Test on ${{ matrix.browser }}
+    - name: 🧪 Cypress E2E Regression on ${{ matrix.browser }}
       uses: cypress-io/github-action@v4
       with:
         browser: ${{ matrix.browser }}
-        command: |
-          bun run regression:${{ matrix.browser }}
+        command: bun run regression:${{ matrix.browser }}
 
-    - name: 📬Generate JUnit/Mocha Report for ${{ matrix.browser }}
+    - name: 📬 Generate JUnit/Mocha Report for ${{ matrix.browser }}
       if: always()
-      run: |
-        bun run ${{ matrix.browser }}:report
+      run: bun run ${{ matrix.browser }}:report
 
-    - name: 📊Upload Artifact ${{ matrix.browser }} Mochawesome Report
+    - name: 📊 Upload Artifact ${{ matrix.browser }} Mochawesome Report
       if: always()
       uses: actions/upload-artifact@v4
       with:
@@ -52,49 +73,64 @@ jobs:
         retention-days: 15
 
   Create-PullRequest:
+    # Solo cuando el disparador fue "push" a dev y pasó la regresión
+    if: ${{ github.event_name == 'push' && github.ref_name == 'dev' }}
     needs: [ RegressionTesting ]
     runs-on: ubuntu-latest
     steps:
-
-    - name: 💻Checkout
+    - name: 💻 Checkout
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-    - name: 🧬 Check for changes
-      id: gitDiff
+    - name: 🧬 Check for changes vs main
+      id: changes
       run: |
         git fetch origin main
-        DIFF=$(git diff --name-only origin/main)
-        if [ "$DIFF" != "" ]; then
-          echo echo "changes=true" >> $GITHUB_OUTPUT
+        if git diff --quiet HEAD origin/main; then
+          echo "changes=false" >> $GITHUB_OUTPUT
+        else
+          echo "changes=true" >> $GITHUB_OUTPUT
         fi
 
-    - name: 📦️ Create Pull Request
-      if: steps.gitDiff.outputs.changes == 'true'
+    - name: 🔎 Skip if PR already exists
+      if: steps.changes.outputs.changes == 'true'
+      id: existing
       uses: actions/github-script@v7
       with:
         script: |
-          const { repo, owner } = context.repo;
-          const result = await github.rest.pulls.create({
-          title: '✅[QA REGRESSION PASSED]: Ready to Merge into MAIN',
-          owner,
-          repo,
-          head: '${{ github.ref_name }}',
-          base: 'main',
-          body: [
-              'Update branch by Automation Pipeline',
-              '- (CI) Build Test Execution is Done✅',
-              '- (CI) Integration-Regression Report is Done✅',
-              '- (TestResults) No Conflicts in Repo Branch QA✅ '
-          ].join('\n')
+          const { owner, repo } = context.repo;
+          const prs = await github.rest.pulls.list({
+            owner, repo, state: 'open', base: 'main', head: `${owner}:dev`
           });
-          github.rest.issues.addLabels({
-          owner,
-          repo,
-          issue_number: result.data.number,
-          labels: ['autoPullRequest']
+          core.setOutput('exists', prs.data.length > 0 ? 'true' : 'false');
+
+    - name: 📦️ Create Pull Request dev -> main
+      if: steps.changes.outputs.changes == 'true' && steps.existing.outputs.exists != 'true'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const { owner, repo } = context.repo;
+          const result = await github.rest.pulls.create({
+            owner, repo,
+            base: 'main',
+            head: 'dev',
+            title: '✅[QA REGRESSION PASSED]: Ready to Merge into MAIN',
+            body: [
+              'Update branch by Automation Pipeline',
+              '- (CI) Build/Test execution finished ✅',
+              '- (CI) Integration-Regression report attached ✅',
+              '- (TestResults) No conflicts vs main ✅'
+            ].join('\n')
+          });
+          await github.rest.issues.addLabels({
+            owner, repo,
+            issue_number: result.data.number,
+            labels: ['autoPullRequest']
           });
 
   AutoMerge-into-Main:
+    if: ${{ github.event_name == 'push' && github.ref_name == 'dev' }}
     needs: [ Create-PullRequest ]
     runs-on: ubuntu-latest
     steps:
@@ -103,5 +139,5 @@ jobs:
       with:
         type: now
         label_name: 'autoPullRequest'
-        target_branch: 'main' #? ESTE ES LA RAMA PRINCIPAL DEL REPOSITORIO PRESENTE
-        github_token: ${{ github.token }}
+        target_branch: 'main'
+        github_token: ${{ secrets.GITHUB_TOKEN }}
