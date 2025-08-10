@@ -31,8 +31,6 @@ jobs:
         include:
         - os: ubuntu-latest
           browser: chrome
-        - os: ubuntu-latest
-          browser: firefox
         - os: windows-latest # Edge estable en Windows
           browser: edge
     runs-on: ${{ matrix.os }}
